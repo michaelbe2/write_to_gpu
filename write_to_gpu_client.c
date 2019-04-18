@@ -62,7 +62,10 @@ static int debug_fast_path = 1;
 #define FDEBUG_LOG if (debug) fprintf
 #define FDEBUG_LOG_FAST_PATH if (debug_fast_path) fprintf
 
-#define DC_KEY 0xffeeddcc
+enum {
+    PINGPONG_RECV_WRID = 1,
+    PINGPONG_SEND_WRID = 2,
+};
 
 /* RDMA control buffer */
 struct rdma_cb {
@@ -71,7 +74,6 @@ struct rdma_cb {
     struct ibv_pd          *pd;
     struct ibv_mr          *gpu_mr;
     struct ibv_cq          *cq;
-    struct ibv_srq         *srq; /* for DCT only */
     struct ibv_qp          *qp;
     void                   *gpu_buf;
     unsigned long           gpu_buf_size;
@@ -212,13 +214,13 @@ static int pp_connect_ctx(struct rdma_cb *cb, struct user_params *usr_par,
     struct ibv_qp_attr attr = {
         .qp_state           = IBV_QPS_RTR,
         .path_mtu           = usr_par->mtu,
-        .dest_qp_num        = dest->qpn, //for RC only
-        .rq_psn             = dest->psn, //for RC only
+        .dest_qp_num        = dest->qpn,
+        .rq_psn             = dest->psn,
         .max_dest_rd_atomic = 1,
-        .min_rnr_timer      = 12, // or 16 ?
+        .min_rnr_timer      = 12,
         .ah_attr            = {
             .is_global      = 0,
-            .dlid           = dest->lid, // for RC only
+            .dlid           = dest->lid,
             .sl             = 0,
             .src_path_bits  = 0,
             .port_num       = usr_par->ib_port
@@ -229,39 +231,38 @@ static int pp_connect_ctx(struct rdma_cb *cb, struct user_params *usr_par,
     if (dest->gid.global.interface_id) {
         attr.ah_attr.is_global = 1;
         attr.ah_attr.grh.hop_limit = 1;
-        attr.ah_attr.grh.dgid = dest->gid; // for RC only
+        attr.ah_attr.grh.dgid = dest->gid;
         attr.ah_attr.grh.sgid_index = usr_par->gidx;
     }
-    attr_mask = IBV_QP_STATE              |
-                IBV_QP_AV                 |
-                IBV_QP_PATH_MTU           |
-                IBV_QP_DEST_QPN           | //RC
-                IBV_QP_RQ_PSN             | //RC
-                IBV_QP_MAX_DEST_RD_ATOMIC | // ?
-                IBV_QP_MIN_RNR_TIMER;
+    attr_mask = IBV_QP_STATE          |
+            IBV_QP_AV                 |
+            IBV_QP_PATH_MTU           |
+            IBV_QP_DEST_QPN           |
+            IBV_QP_RQ_PSN             |
+            IBV_QP_MAX_DEST_RD_ATOMIC |
+            IBV_QP_MIN_RNR_TIMER;
 
     if (ibv_modify_qp(cb->qp, &attr, attr_mask)) {
         fprintf(stderr, "Failed to modify QP to RTR\n");
         return 1;
     }
 
-    // The next we don't need for DC (probably, for RC too)
-//    attr.qp_state       = IBV_QPS_RTS;
-//    attr.timeout        = 14;
-//    attr.retry_cnt      = 7;
-//    attr.rnr_retry      = 7;
-//    attr.sq_psn     = my_psn;
-//    attr.max_rd_atomic  = 1;
-//    attr_mask = IBV_QP_STATE              |
-//                IBV_QP_TIMEOUT            |
-//                IBV_QP_RETRY_CNT          |
-//                IBV_QP_RNR_RETRY          |
-//                IBV_QP_SQ_PSN             |
-//                IBV_QP_MAX_QP_RD_ATOMIC);
-//    if (ibv_modify_qp(cb->qp, &attr, attr_mask)) {
-//        fprintf(stderr, "Failed to modify QP to RTS\n");
-//        return 1;
-//    }
+    attr.qp_state       = IBV_QPS_RTS;
+    attr.timeout        = 14;
+    attr.retry_cnt      = 7;
+    attr.rnr_retry      = 7;
+    attr.sq_psn     = my_psn;
+    attr.max_rd_atomic  = 1;
+    if (ibv_modify_qp(cb->qp, &attr,
+                  IBV_QP_STATE              |
+                  IBV_QP_TIMEOUT            |
+                  IBV_QP_RETRY_CNT          |
+                  IBV_QP_RNR_RETRY          |
+                  IBV_QP_SQ_PSN             |
+                  IBV_QP_MAX_QP_RD_ATOMIC)) {
+        fprintf(stderr, "Failed to modify QP to RTS\n");
+        return 1;
+    }
 
     return 0;
 }
@@ -424,64 +425,25 @@ static struct rdma_cb *pp_init_ctx(struct ibv_device *ib_dev,
         goto clean_mr;
     }
 
-    /* - - - - - - -  Create SRQ  - - - - - - - */
-    struct ibv_srq_init_attr srq_attr;
-    memset(&srq_attr, 0, sizeof(srq_attr));
-    srq_attr.attr.max_wr = 2;
-    srq_attr.attr.max_sge = 1;
-    cb->srq = ibv_create_srq(cb->pd, &srq_attr);
-    if (!cb->srq) {
-        fprintf(stderr, "ibv_create_srq failed\n");
-        goto clean_cq;
-    }
-    DEBUG_LOG("created srq %p\n", cb->srq);
-
     {
-//        struct ibv_qp_init_attr attr = {
-//            .send_cq = cb->cq,
-//            .recv_cq = cb->cq,
-//            .cap     = {
-//                .max_send_wr  = 1,
-//                .max_recv_wr  = cb->rx_depth,
-//                .max_send_sge = 1,
-//                .max_recv_sge = 1
-//            },
-//            .qp_type = IBV_QPT_RC,
-//        };
-        struct ibv_qp_init_attr_ex attr_ex;
-        struct mlx5dv_qp_init_attr attr_dv;
+        struct ibv_qp_init_attr attr = {
+            .send_cq = cb->cq,
+            .recv_cq = cb->cq,
+            .cap     = {
+                .max_send_wr  = 1,
+                .max_recv_wr  = cb->rx_depth,
+                .max_send_sge = 1,
+                .max_recv_sge = 1
+            },
+            .qp_type = IBV_QPT_RC,
+        };
 
-        memset(&attr_ex, 0, sizeof(attr_ex));
-        memset(&attr_dv, 0, sizeof(attr_dv));
-
-        attr_ex.qp_type = IBV_QPT_RC; //IBV_QPT_DRIVER;
-        attr_ex.send_cq = cb->cq;
-        attr_ex.recv_cq = cb->cq;
-
-        // For RC start
-        attr_ex.cap.max_send_wr  = 1;
-        attr_ex.cap.max_recv_wr  = 0; /* SRQ is used */ //cb->rx_depth;
-        attr_ex.cap.max_send_sge = 1;
-        attr_ex.cap.max_recv_sge = 1;
-        // For RC end //////
-
-        attr_ex.comp_mask |= IBV_QP_INIT_ATTR_PD;
-        attr_ex.pd = cb->pd;
-        attr_ex.srq = cb->srq; /* Should use SRQ for client only (DCT) */
-        
-//        /* create DCT */
-//        attr_dv.comp_mask |= MLX5DV_QP_INIT_ATTR_MASK_DC;
-//        attr_dv.dc_init_attr.dc_type = MLX5DV_DCTYPE_DCT;
-//        attr_dv.dc_init_attr.dct_access_key = DC_KEY;
-
-        //DEBUG_LOG ("ibv_create_qp(%p,%p)\n", cb->pd, &attr);
-        //cb->qp = ibv_create_qp(cb->pd, &attr); //TO-DC-1
-        DEBUG_LOG ("mlx5dv_create_qp(%p,%p,%p)\n", cb->context, &attr_ex, &attr_dv);
-        cb->qp = mlx5dv_create_qp(cb->context, &attr_ex, &attr_dv);
+        DEBUG_LOG ("ibv_create_qp(%p,%p)\n", cb->pd, &attr);
+        cb->qp = ibv_create_qp(cb->pd, &attr); //todo mlx5dv_create_qp(cb->cm_id->verbs, &attr_ex, &attr_dv);
 
         if (!cb->qp)  {
             fprintf(stderr, "Couldn't create QP\n");
-            goto clean_srq;
+            goto clean_cq;
         }
     }
 
@@ -512,9 +474,6 @@ clean_qp:
 
 clean_cq:
     ibv_destroy_cq(cb->cq);
-
-clean_srq:
-    ibv_destroy_srq(cb->srq);
 
 clean_mr:
     ibv_dereg_mr(cb->gpu_mr);
@@ -553,13 +512,6 @@ int pp_close_ctx(struct rdma_cb *cb)
         return 1;
     }
 
-	if (cb->srq) {
-        if (ibv_destroy_srq(cb->srq)) {
-            fprintf(stderr, "Couldn't destroy CQ\n");
-            return 1;
-        }
-    }
-    
     if (ibv_dereg_mr(cb->gpu_mr)) {
         fprintf(stderr, "Couldn't deregister GPU MR\n");
         return 1;
@@ -592,28 +544,28 @@ int pp_close_ctx(struct rdma_cb *cb)
     return 0;
 }
 
-static int pp_post_recv(struct rdma_cb *cb, int n)//
-{                                                 //
-    struct ibv_sge list = {                       //
-        .addr   = (uintptr_t) cb->gpu_buf,        //
-        .length = cb->gpu_buf_size,               //
-        .lkey   = cb->gpu_mr->lkey                //
-    };                                            //
-    struct ibv_recv_wr wr = {                     //
-        .wr_id      = 0 /*RECV_WRID*/,            //
-        .sg_list    = &list,                      //
-        .num_sge    = 1,                          //
-        .next       = NULL                        //
-    };                                            //
-    struct ibv_recv_wr *bad_wr;                   //
-    int i;                                        //
-                                                  //
-    for (i = 0; i < n; ++i)                       //
-        if (ibv_post_recv(cb->qp, &wr, &bad_wr))  //
-            break;                                //
-                                                  //
-    return i;                                     //
-}                                                 //
+static int pp_post_recv(struct rdma_cb *cb, int n) //
+{                                                            //
+    struct ibv_sge list = {                                  //
+        .addr   = (uintptr_t) cb->gpu_buf,                  //
+        .length = cb->gpu_buf_size,                         //
+        .lkey   = cb->gpu_mr->lkey                          //
+    };                                                       //
+    struct ibv_recv_wr wr = {                                //
+        .wr_id      = PINGPONG_RECV_WRID,                    //
+        .sg_list    = &list,                                 //
+        .num_sge    = 1,                                     //
+        .next       = NULL                                   //
+    };                                                       //
+    struct ibv_recv_wr *bad_wr;                              //
+    int i;                                                   //
+                                                             //
+    for (i = 0; i < n; ++i)                                  //
+        if (ibv_post_recv(cb->qp, &wr, &bad_wr))            //
+            break;                                           //
+                                                             //
+    return i;                                                //
+}                                                            //
 
 static void usage(const char *argv0)
 {
@@ -789,7 +741,7 @@ int main(int argc, char *argv[])
         for (i = 0; dev_list[i]; ++i) {
             char *dev_name = (char*)ibv_get_device_name(dev_list[i]);
             DEBUG_LOG ("Device %d name \"%s\"\n", i, dev_name);
-            if (!strcmp(dev_name, usr_par.ib_devname))
+            if (!strcmp(ibv_get_device_name(dev_list[i]), usr_par.ib_devname))
                 break;
         }
         ib_dev = dev_list[i];
@@ -869,11 +821,11 @@ int main(int argc, char *argv[])
      */
     for (cnt = 0; cnt < usr_par.iters; cnt++) {
 
-        char sendmsg[sizeof "0102030405060708:01020304:01020304:01020304"];
+        char sendmsg[sizeof "0102030405060708:01020304:01020304"];
         char ackmsg[sizeof "rdma_write completed"];
 
         // Sending RDMA data (address and rkey) by socket as a triger to start RDMA write operation
-        sprintf(sendmsg, "%016llx:%08lx:%08x:%08x", (unsigned long long)cb->gpu_buf, cb->gpu_buf_size, cb->gpu_mr->rkey, cb->qp->qp_num);
+        sprintf(sendmsg, "%016llx:%08lx:%08x", (unsigned long long)cb->gpu_buf, cb->gpu_buf_size, cb->gpu_mr->rkey);
         DEBUG_LOG_FAST_PATH("Send message N %d: \"%s\" to the server\n", cnt, sendmsg);
         if (write(cb->sockfd, sendmsg, sizeof sendmsg) != sizeof sendmsg) {
             fprintf(stderr, "Couldn't send RDMA data for iteration\n");

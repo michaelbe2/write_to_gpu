@@ -2,7 +2,7 @@ IDIR =.
 CC =gcc
 CFLAGS =-I$(IDIR) -g
 ODIR =obj
-LIBS =-Wall -libverbs -lmlx5
+LIBS =-Wall -libverbs
 OEXE_CL =write_to_gpu_client
 OEXE_SE =write_to_gpu_server
 
