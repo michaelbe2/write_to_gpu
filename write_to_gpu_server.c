@@ -522,15 +522,15 @@ static int pp_post_send(struct rdma_cb *cb)
     /* 1st small RDMA Write for DCI connect, this will create cqe->ts_start */
     DEBUG_LOG_FAST_PATH("1st small RDMA Write: ibv_wr_start: qpex = %p\n", cb->qpex);
     ibv_wr_start(cb->qpex);
-    cb->qpex->wr_id = SMALL_WRITE_WRID;
+//    cb->qpex->wr_id = SMALL_WRITE_WRID;
     cb->qpex->wr_flags = IBV_SEND_SIGNALED;
-    DEBUG_LOG_FAST_PATH("1st small RDMA Write: ibv_wr_rdma_write: qpex = %p, rkey = 0x%x, remote buf 0x%llx\n",
-                        cb->qpex, cb->gpu_buf_rkey, (unsigned long long)cb->gpu_buf_addr);
-    ibv_wr_rdma_write(cb->qpex, cb->gpu_buf_rkey, cb->gpu_buf_addr);
-    mlx5dv_wr_set_dc_addr(cb->mqpex, cb->ah, cb->rem_dctn, DC_KEY);
-    DEBUG_LOG_FAST_PATH("1st small RDMA Write: ibv_wr_set_sge: qpex = %p, lkey 0x%x, local buf 0x%llx, size = %u\n",
-                        cb->qpex, cb->mr->lkey, (unsigned long long)cb->buf, 1);
-    ibv_wr_set_sge(cb->qpex, cb->mr->lkey, (uintptr_t)cb->buf, 1);
+//    DEBUG_LOG_FAST_PATH("1st small RDMA Write: ibv_wr_rdma_write: qpex = %p, rkey = 0x%x, remote buf 0x%llx\n",
+//                        cb->qpex, cb->gpu_buf_rkey, (unsigned long long)cb->gpu_buf_addr);
+//    ibv_wr_rdma_write(cb->qpex, cb->gpu_buf_rkey, cb->gpu_buf_addr);
+//    mlx5dv_wr_set_dc_addr(cb->mqpex, cb->ah, cb->rem_dctn, DC_KEY);
+//    DEBUG_LOG_FAST_PATH("1st small RDMA Write: ibv_wr_set_sge: qpex = %p, lkey 0x%x, local buf 0x%llx, size = %u\n",
+//                        cb->qpex, cb->mr->lkey, (unsigned long long)cb->buf, 1);
+//    ibv_wr_set_sge(cb->qpex, cb->mr->lkey, (uintptr_t)cb->buf, 1);
 
     /* 2nd SIZE x RDMA Write, this will create cqe->ts_end */
     cb->qpex->wr_id = BUFF_WRITE_WRID;
@@ -821,7 +821,7 @@ int main(int argc, char *argv[])
     /****************************************************************************************************
      * The main loop where we client and server send and receive "iters" number of messages
      */
-    while ((scnt < usr_par.iters)||(pre_scnt < usr_par.iters)) {
+    while (scnt < usr_par.iters) {
 
         int  r_size;
         char receivemsg[sizeof "0102030405060708:01020304:01020304:01020304"];
@@ -846,7 +846,7 @@ int main(int argc, char *argv[])
             fprintf(stderr, "Couldn't post send: %u\n", ret);
             return 1;
         }
-        do {
+        {
             struct ibv_wc wc[2];
             int ne, i;
 
@@ -861,7 +861,7 @@ int main(int argc, char *argv[])
             // Polling completion queue
             DEBUG_LOG_FAST_PATH("Polling completion queue\n");
             do {
-                DEBUG_LOG_FAST_PATH("Before ibv_poll_cq\n");
+                //DEBUG_LOG_FAST_PATH("Before ibv_poll_cq\n");
                 ne = ibv_poll_cq(cb->cq, 2, wc);
                 if (ne < 0) {
                     fprintf(stderr, "poll CQ failed %d\n", ne);
@@ -878,20 +878,20 @@ int main(int argc, char *argv[])
                 }
 
                 switch ((int) wc[i].wr_id) {
-                case SMALL_WRITE_WRID:
-                    ++pre_scnt;
-                    DEBUG_LOG_FAST_PATH("SMALL_WRITE_WRID complrtion: pre_scnt = %d, scnt = %d\n", pre_scnt, scnt);
-                    break;
+//                case SMALL_WRITE_WRID:
+//                    ++pre_scnt;
+//                    DEBUG_LOG_FAST_PATH("SMALL_WRITE_WRID complrtion: pre_scnt = %d, scnt = %d\n", pre_scnt, scnt);
+//                    break;
                 case BUFF_WRITE_WRID:
                     ++scnt;
-                    DEBUG_LOG_FAST_PATH("BUFF_WRITE_WRID complrtion: pre_scnt = %d, scnt = %d\n", pre_scnt, scnt);
+                    DEBUG_LOG_FAST_PATH("BUFF_WRITE_WRID complrtion: scnt = %d\n", scnt);
                     break;
                 default:
                     fprintf(stderr, "Completion for unknown wr_id %d\n", (int) wc[i].wr_id);
                     return 1;
                 }
             }
-        } while (pre_scnt > scnt);
+        }
 
         // Sending ack-message to the client, confirming that RDMA write has been completet
         if (write(cb->sockfd, "rdma_write completed", sizeof("rdma_write completed")) != sizeof("rdma_write completed")) {
